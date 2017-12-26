@@ -1,0 +1,300 @@
+import boto3
+import collections
+import datetime
+import sys
+import pprint
+import json
+
+ec = boto3.client('ec2')
+#image = ec.Image('id')
+ses = boto3.client('ses')
+
+threshold_millis = 10 * 1000
+
+email_from = 'samratpriyadarshi46@gmail.com'
+email_to = 'samratpriyadarshi46@gmail.com'
+email_cc = 'samratpriyadarshi46@gmail.com'
+emaiL_subject = '** ALARM: \"Silver Subscription\" AMI Backup Successful **'
+email_body = 'Dear Customer,\n\nBelow is the detail of the Instances whose AMI Backup was successful\n\n *********AMI BACKUP SUCCESSFUL*********\n\nAMI Backup Details:\n-Name: \t\t\"LambdaAMIBackup_Silver\" \n-Region: \tUS East (N. Virginia)\n-Subscription: \tSilver\n-Number of AMI Backup Taken: '
+
+def publish_to_sns(message):
+    sns = boto3.client('sns')
+    return sns.publish(
+          TopicArn='arn:aws:sns:us-west-2:107840965488:test_backup',
+          Message=json.dumps(message),
+          MessageStructure='string',
+          MessageAttributes={
+               'summary': {
+                      'StringValue': 'just a summary',
+                      'DataType': 'String'
+               }
+          }
+    )
+
+
+def send_email(already_present, no_of_amis):
+    response = ses.send_email(
+        Source = email_from,
+        Destination={
+            'ToAddresses': [
+                email_to,
+            ],
+            'CcAddresses': [
+                email_cc,
+            ]
+        },
+        Message={
+            'Subject': {
+                'Data': emaiL_subject
+            },
+            'Body': {
+                'Text': {
+                    'Data': email_body + no_of_amis + '\n-InstanceID: ' + already_present + '\n\n\nRegards,\nCognizant Cloud Services'
+                }
+            }
+        }
+    )
+    return "Completed"
+
+
+# def count_amis():
+
+def lambda_handler(event, context):
+    
+    if not event.get('Records', None):
+        reservations = ec.describe_instances(
+            Filters=[
+                # {'Name': 'tag-key', 'Values': ['silver', 'Silver']}, # Filter the appropriate subscription
+                # {'Name': 'tag-key', 'Values': ['backup', 'Backup']}
+            ]
+        ).get(
+            'Reservations', []
+        )
+    
+        instances = sum(
+            [
+                [i for i in r['Instances']]
+                for r in reservations
+            ], [])
+    
+        print "Found %d instances that need backing up" % len(instances)
+    
+        to_tag = collections.defaultdict(list)
+        
+        ec2 = boto3.resource('ec2', region_name='us-west-2')
+        owner_id = boto3.client('sts').get_caller_identity().get('Account')
+        filters = [{'Name': 'owner-id', 'Values': [owner_id]},
+                #   {'Name': 'tag-key', 'Values': ['DeleteOn']},
+                ]
+        images = ec2.images.filter(Filters=filters).all()
+        
+        create_time = datetime.datetime.now()
+        create_fmt = create_time.strftime('%Y-%m-%d')
+        
+        for instance in instances:
+            
+            Name = "Lambda - " + instance['InstanceId'] + " from " + create_fmt
+            # if Name in images:
+            already_present = []
+            already_present_instance = []    
+            for image in images:
+                if image.name == Name:
+                    already_present.append(instance)
+                    already_present_instance.append(instance['InstanceId'])
+        already_present_string = '\n'.join(map(str,already_present_instance) )   
+        
+        for x in already_present:
+            instances.remove(x)
+        # print instances 
+        count_already_present = str(len(already_present))
+        count = len(instances)
+        print count
+        
+        if instances == []:
+            send_email(already_present_string, count_already_present)
+        
+        else:
+            for instance in instances:
+                count = count - 1
+                try:
+                    retention_days = [
+                        int(t.get('Value')) for t in instance['Tags']
+                        if t['Key'] == 'Retention'][0]
+                except IndexError:
+                    retention_days = 7
+                finally:   
+                    
+                    
+                    # AMIid = ec.create_image(InstanceId=instance['InstanceId'], Name, Description="Lambda created AMI of instance " + instance['InstanceId'] + " from " + create_fmt, NoReboot=True, DryRun=False)
+                    AMIid = ec.create_image(InstanceId=instance['InstanceId'], Name="Lambda - " + instance['InstanceId'] + " from " + create_fmt, Description="Lambda created AMI of instance " + instance['InstanceId'] + " from " + create_fmt, NoReboot=True, DryRun=False)
+        
+                    pprint.pprint(instance)
+                    #sys.exit()
+                    #break
+                    
+                    #to_tag[retention_days].append(AMIid)
+                        
+                    to_tag[retention_days].append(AMIid['ImageId'])
+                        
+                    print "Retaining AMI %s of instance %s for %d days" % (
+                        AMIid['ImageId'],
+                        instance['InstanceId'],
+                        retention_days,
+                    )
+                    
+                    delete_date = datetime.date.today() + datetime.timedelta(days=retention_days)
+                    delete_fmt = delete_date.strftime('%m-%d-%Y')
+                    
+                    ec.create_tags(
+                    Resources=[AMIid['ImageId']],
+                    Tags=[
+                        {'Key': 'DeleteOn', 'Value': delete_fmt},
+                        ]
+                    )
+                    if count == 0:
+                        send_email(already_present_string, count_already_present)
+                        
+                    remain_millis = context.get_remaining_time_in_millis()
+                    if remain_millis < threshold_millis:
+                        msg = {"necessary information for next function": [instances]}
+                        publish_to_sns(msg)
+                        return {"partially completed": True}
+    
+        print to_tag.keys()
+        print to_tag.values()
+        
+        
+        # for retention_days in to_tag.keys():
+        #     delete_date = datetime.date.today() + datetime.timedelta(days=retention_days)
+        #     delete_fmt = delete_date.strftime('%m-%d-%Y')
+        #     print "Will delete %d AMIs on %s" % (len(to_tag[retention_days]), delete_fmt)
+            
+        #     #break
+        
+            # ec.create_tags(
+            #     Resources=to_tag[retention_days],
+            #     Tags=[
+            #         {'Key': 'DeleteOn', 'Value': delete_fmt},
+            #     ]
+            # )
+    
+    else:
+        message = json.loads(event['Records'][0]['Sns']['Message'])
+        print message
+        reservations = ec.describe_instances(
+            Filters=[
+                # {'Name': 'tag-key', 'Values': ['silver', 'Silver']}, # Filter the appropriate subscription
+                # {'Name': 'tag-key', 'Values': ['backup', 'Backup']}
+            ]
+        ).get(
+            'Reservations', []
+        )
+    
+        instances = sum(
+            [
+                [i for i in r['Instances']]
+                for r in reservations
+            ], [])
+    
+        print "Found %d instances that need backing up" % len(instances)
+    
+        to_tag = collections.defaultdict(list)
+        
+        ec2 = boto3.resource('ec2', region_name='us-west-2')
+        owner_id = boto3.client('sts').get_caller_identity().get('Account')
+        filters = [{'Name': 'owner-id', 'Values': [owner_id]},
+                #   {'Name': 'tag-key', 'Values': ['DeleteOn']},
+                ]
+        images = ec2.images.filter(Filters=filters).all()
+        
+        create_time = datetime.datetime.now()
+        create_fmt = create_time.strftime('%Y-%m-%d')
+        
+        for instance in instances:
+            
+            Name = "Lambda - " + instance['InstanceId'] + " from " + create_fmt
+            # if Name in images:
+            already_present = []
+            already_present_instance = []    
+            for image in images:
+                if image.name == Name:
+                    already_present.append(instance)
+                    already_present_instance.append(instance['InstanceId'])
+        already_present_string = '\n'.join(map(str,already_present_instance) )   
+        
+        for x in already_present:
+            instances.remove(x)
+        # print instances 
+        count_already_present = str(len(already_present))
+        count = len(instances)
+        print count
+        
+        if instances == []:
+            send_email(already_present_string, count_already_present)
+        
+        else:
+            for instance in instances:
+                count = count - 1
+                try:
+                    retention_days = [
+                        int(t.get('Value')) for t in instance['Tags']
+                        if t['Key'] == 'Retention'][0]
+                except IndexError:
+                    retention_days = 7
+                finally:   
+                    
+                    
+                    # AMIid = ec.create_image(InstanceId=instance['InstanceId'], Name, Description="Lambda created AMI of instance " + instance['InstanceId'] + " from " + create_fmt, NoReboot=True, DryRun=False)
+                    AMIid = ec.create_image(InstanceId=instance['InstanceId'], Name="Lambda - " + instance['InstanceId'] + " from " + create_fmt, Description="Lambda created AMI of instance " + instance['InstanceId'] + " from " + create_fmt, NoReboot=True, DryRun=False)
+        
+                    pprint.pprint(instance)
+                    #sys.exit()
+                    #break
+                    
+                    #to_tag[retention_days].append(AMIid)
+                        
+                    to_tag[retention_days].append(AMIid['ImageId'])
+                        
+                    print "Retaining AMI %s of instance %s for %d days" % (
+                        AMIid['ImageId'],
+                        instance['InstanceId'],
+                        retention_days,
+                    )
+                    
+                    delete_date = datetime.date.today() + datetime.timedelta(days=retention_days)
+                    delete_fmt = delete_date.strftime('%m-%d-%Y')
+                    
+                    ec.create_tags(
+                    Resources=[AMIid['ImageId']],
+                    Tags=[
+                        {'Key': 'DeleteOn', 'Value': delete_fmt},
+                        ]
+                    )
+                    if count == 0:
+                        send_email(already_present_string, count_already_present)
+                    
+                    remain_millis = context.get_remaining_time_in_millis()
+                    if remain_millis < threshold_millis:
+                        msg = {"necessary information for next function": "here"}
+                        publish_to_sns(msg)
+                        return {"partially completed": True}
+    
+        print to_tag.keys()
+        print to_tag.values()
+        
+        
+        
+        # for retention_days in to_tag.keys():
+        #     delete_date = datetime.date.today() + datetime.timedelta(days=retention_days)
+        #     delete_fmt = delete_date.strftime('%m-%d-%Y')
+        #     print "Will delete %d AMIs on %s" % (len(to_tag[retention_days]), delete_fmt)
+            
+        #     #break
+        
+            # ec.create_tags(
+            #     Resources=to_tag[retention_days],
+            #     Tags=[
+            #         {'Key': 'DeleteOn', 'Value': delete_fmt},
+            #     ]
+            # )
+    
