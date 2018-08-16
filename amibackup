@@ -11,16 +11,16 @@ ses = boto3.client('ses')
 
 threshold_millis = 10 * 1000
 
-email_from = 'samratpriyadarshi46@gmail.com'
-email_to = 'samratpriyadarshi46@gmail.com'
-email_cc = 'samratpriyadarshi46@gmail.com'
+email_from = 'email_id'
+email_to = 'email_id'
+email_cc = 'email_id'
 emaiL_subject = '** ALARM: \"Silver Subscription\" AMI Backup Successful **'
 email_body = 'Dear Customer,\n\nBelow is the detail of the Instances whose AMI Backup was successful\n\n *********AMI BACKUP SUCCESSFUL*********\n\nAMI Backup Details:\n-Name: \t\t\"LambdaAMIBackup_Silver\" \n-Region: \tUS East (N. Virginia)\n-Subscription: \tSilver\n-Number of AMI Backup Taken: '
 
 def publish_to_sns(message):
     sns = boto3.client('sns')
     return sns.publish(
-          TopicArn='arn:aws:sns:us-west-2:107840965488:test_backup',
+          TopicArn='arn:aws:sns:us-west-2:account_id:test_backup',
           Message=json.dumps(message),
           MessageStructure='string',
           MessageAttributes={
